@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure Password Manager</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <div class="app">
+
+        <header class="topbar">
+            <div>
+                <h1>🔐 Secure Password Manager</h1>
+                <p>Your passwords, protected with encryption.</p>
+            </div>
+            <button id="lockBtn" class="danger-btn">🔒 Lock Vault</button>
+        </header>
+
+        <main>
+
+            <!-- Login Section -->
+            <section id="loginSection" class="card">
+                <h2>Unlock Vault</h2>
+                <p>Enter your master password to access your vault.</p>
+
+                <input
+                    type="password"
+                    id="masterPassword"
+                    placeholder="Master password"
+                >
+
+                <button id="unlockBtn" class="primary-btn">
+                    Unlock Vault
+                </button>
+
+                <p id="loginMessage" class="message"></p>
+            </section>
+
+
+            <!-- Vault Section -->
+            <section id="vaultSection" class="hidden">
+
+                <div class="card">
+                    <div class="section-heading">
+                        <div>
+                            <h2>Password Vault</h2>
+                            <p>Manage your stored credentials.</p>
+                        </div>
+                        <span id="sessionStatus" class="status">
+                            🔓 Unlocked
+                        </span>
+                    </div>
+                </div>
+
+
+                <!-- Add Password -->
+                <section class="card">
+                    <h2>Add Password</h2>
+
+                    <div class="form-grid">
+
+                        <div>
+                            <label for="website">Website</label>
+                            <input
+                                type="text"
+                                id="website"
+                                placeholder="example.com"
+                            >
+                        </div>
+
+                        <div>
+                            <label for="username">Username / Email</label>
+                            <input
+                                type="text"
+                                id="username"
+                                placeholder="you@example.com"
+                            >
+                        </div>
+
+                        <div>
+                            <label for="entryPassword">Password</label>
+                            <input
+                                type="password"
+                                id="entryPassword"
+                                placeholder="Enter password"
+                            >
+                        </div>
+
+                    </div>
+
+                    <div class="button-row">
+                        <button id="generateBtn" class="secondary-btn">
+                            ✨ Generate Password
+                        </button>
+
+                        <button id="addBtn" class="primary-btn">
+                            Add Password
+                        </button>
+                    </div>
+
+                    <p id="addMessage" class="message"></p>
+                </section>
+
+
+                <!-- Stored Passwords -->
+                <section class="card">
+                    <div class="section-heading">
+                        <div>
+                            <h2>Stored Passwords</h2>
+                            <p>Your saved website credentials.</p>
+                        </div>
+
+                        <button id="refreshBtn" class="secondary-btn">
+                            ↻ Refresh
+                        </button>
+                    </div>
+
+                    <div id="passwordList" class="password-list">
+                        <p class="empty-message">
+                            No passwords loaded.
+                        </p>
+                    </div>
+                </section>
+
+
+                <!-- Security Actions -->
+                <section class="card">
+                    <h2>Security</h2>
+
+                    <div class="security-grid">
+
+                        <button id="changeMasterBtn" class="secondary-btn">
+                            🔑 Change Master Password
+                        </button>
+
+                        <button id="backupBtn" class="secondary-btn">
+                            💾 Backup Vault
+                        </button>
+
+                        <button id="restoreBtn" class="secondary-btn">
+                            ♻️ Restore Vault
+                        </button>
+
+                    </div>
+
+                    <p id="securityMessage" class="message"></p>
+                </section>
+
+            </section>
+
+        </main>
+
+        <footer>
+            <p>Secure Password Manager • AES-256-GCM + Argon2id</p>
+        </footer>
+
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
