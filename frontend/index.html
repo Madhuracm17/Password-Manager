@@ -4,7 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Secure Password Manager</title>
-    <link rel="stylesheet" href="style.css">
+
+    <!-- Fonts: Manrope (headings), Plus Jakarta Sans (body) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <link rel="stylesheet" href="style.css?v=6">
 </head>
 <body>
 
@@ -12,10 +18,10 @@
 
         <header class="topbar">
             <div>
-                <h1>🔐 Secure Password Manager</h1>
-                <p>Your passwords, protected with encryption.</p>
+                <h1>Secure Password Manager</h1>
+                <p>Local, encrypted, and yours alone.</p>
             </div>
-            <button id="lockBtn" class="danger-btn">🔒 Lock Vault</button>
+            <button id="lockBtn" class="danger-btn hidden">Lock Vault</button>
         </header>
 
         <main>
@@ -25,15 +31,18 @@
                 <h2>Unlock Vault</h2>
                 <p>Enter your master password to access your vault.</p>
 
-                <input
-                    type="password"
-                    id="masterPassword"
-                    placeholder="Master password"
-                >
+                <div class="unlock-row">
+                    <input
+                        type="password"
+                        id="masterPassword"
+                        placeholder="Master password"
+                        autocomplete="current-password"
+                    >
 
-                <button id="unlockBtn" class="primary-btn">
-                    Unlock Vault
-                </button>
+                    <button id="unlockBtn" class="primary-btn">
+                        Unlock Vault
+                    </button>
+                </div>
 
                 <p id="loginMessage" class="message"></p>
             </section>
@@ -49,7 +58,7 @@
                             <p>Manage your stored credentials.</p>
                         </div>
                         <span id="sessionStatus" class="status">
-                            🔓 Unlocked
+                            Unlocked
                         </span>
                     </div>
                 </div>
@@ -58,6 +67,7 @@
                 <!-- Add Password -->
                 <section class="card">
                     <h2>Add Password</h2>
+                    <p>Save a new credential to your encrypted vault.</p>
 
                     <div class="form-grid">
 
@@ -92,7 +102,7 @@
 
                     <div class="button-row">
                         <button id="generateBtn" class="secondary-btn">
-                            ✨ Generate Password
+                            Generate Password
                         </button>
 
                         <button id="addBtn" class="primary-btn">
@@ -113,7 +123,7 @@
                         </div>
 
                         <button id="refreshBtn" class="secondary-btn">
-                            ↻ Refresh
+                            Refresh
                         </button>
                     </div>
 
@@ -122,27 +132,73 @@
                             No passwords loaded.
                         </p>
                     </div>
+
+                    <p id="listMessage" class="message"></p>
                 </section>
 
 
                 <!-- Security Actions -->
                 <section class="card">
                     <h2>Security</h2>
+                    <p>Change your master password or manage encrypted backups.</p>
 
                     <div class="security-grid">
 
                         <button id="changeMasterBtn" class="secondary-btn">
-                            🔑 Change Master Password
+                            Change Master Password
                         </button>
 
                         <button id="backupBtn" class="secondary-btn">
-                            💾 Backup Vault
+                            Backup Vault
                         </button>
 
                         <button id="restoreBtn" class="secondary-btn">
-                            ♻️ Restore Vault
+                            Restore Vault
                         </button>
 
+                    </div>
+
+                    <!-- Change master password (hidden until requested) -->
+                    <div id="changeMasterForm" class="sub-panel hidden">
+                        <h3>Change Master Password</h3>
+
+                        <div class="form-grid">
+                            <div>
+                                <label for="currentMaster">Current master password</label>
+                                <input type="password" id="currentMaster" autocomplete="current-password">
+                            </div>
+                            <div>
+                                <label for="newMaster">New master password</label>
+                                <input type="password" id="newMaster" autocomplete="new-password">
+                            </div>
+                            <div>
+                                <label for="confirmMaster">Confirm new password</label>
+                                <input type="password" id="confirmMaster" autocomplete="new-password">
+                            </div>
+                        </div>
+
+                        <div class="button-row">
+                            <button id="saveMasterBtn" class="primary-btn">Change Password</button>
+                            <button id="cancelMasterBtn" class="secondary-btn">Cancel</button>
+                        </div>
+                    </div>
+
+                    <!-- Restore from backup (hidden until requested) -->
+                    <div id="restoreForm" class="sub-panel hidden">
+                        <h3>Restore Vault from Backup</h3>
+                        <p>Enter the master password that was in use when the backup was made.</p>
+
+                        <div class="form-grid form-grid-single">
+                            <div>
+                                <label for="backupPassword">Backup's master password</label>
+                                <input type="password" id="backupPassword" autocomplete="off">
+                            </div>
+                        </div>
+
+                        <div class="button-row">
+                            <button id="confirmRestoreBtn" class="danger-btn">Restore Backup</button>
+                            <button id="cancelRestoreBtn" class="secondary-btn">Cancel</button>
+                        </div>
                     </div>
 
                     <p id="securityMessage" class="message"></p>
@@ -153,11 +209,11 @@
         </main>
 
         <footer>
-            <p>Secure Password Manager • AES-256-GCM + Argon2id</p>
+            <p>&middot; Secure Password Manager &middot; </p>
         </footer>
 
     </div>
 
-    <script src="script.js"></script>
+    <script src="script.js?v=6"></script>
 </body>
 </html>

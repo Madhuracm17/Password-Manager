@@ -47,7 +47,7 @@ WEAK_LEVELS = ("Very Weak", "Weak")
 MAX_LOGIN_ATTEMPTS = 3
 RETRY_DELAYS = (1, 2)
 
-AUTO_LOCK_SECONDS = 120   # 2 minutes
+AUTO_LOCK_SECONDS = 10   # 2 minutes
 
 
 # ============================================================
@@ -1379,6 +1379,15 @@ def main():
                 "> "
             ).strip().lower()
 
+            # The session may have auto-locked while waiting for input.
+            if session["locked"]:
+
+                print(
+                    "Command ignored: the vault locked due to inactivity."
+                )
+
+                continue
+
             reset_activity_timer(
                 session
             )
@@ -1454,6 +1463,15 @@ def main():
                         )
 
                         continue
+
+                if session["locked"]:
+
+                    print(
+                        "Vault locked due to inactivity. "
+                        "Password entry cancelled."
+                    )
+
+                    continue
 
                 session["data"].setdefault(
                     "entries",

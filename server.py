@@ -1,19 +1,105 @@
 import json
 import os
+import secrets
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse
 
 from vault import (
     VAULT_FILE,
+    BACKUP_FILE,
+    MAGIC,
+    MIN_BLOB_LEN,
+    WEAK_LEVELS,
     encrypt_vault,
     decrypt_vault,
     check_password_strength,
     generate_password,
+    log_security_event,
 )
 
 
 HOST = "127.0.0.1"
 PORT = 8000
+
+GENERIC_AUTH_ERROR = "Wrong master password OR vault was tampered with."
+
+
+# ============================================================
+# FILE HELPERS
+# ============================================================
+
+def write_atomic(path, blob):
+    """
+    Write bytes to a temporary file, flush to disk, then replace
+    the target in one step. A crash leaves the old or the new file,
+    never half of one.
+    """
+
+    tmp = path + ".tmp"
+
+    try:
+
+        with open(tmp, "wb") as f:
+            f.write(blob)
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(tmp, path)
+
+    except OSError:
+
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+
+        raise
+
+
+def read_vault_file(path):
+    """
+    Read a vault file and check its basic format.
+    Returns the bytes, or None if missing or malformed.
+    """
+
+    if not os.path.exists(path):
+        return None
+
+    with open(path, "rb") as f:
+        blob = f.read()
+
+    if len(blob) < MIN_BLOB_LEN or blob[:4] != MAGIC:
+        return None
+
+    return blob
+
+
+def new_entry_id():
+    """
+    Random, unguessable ID so edit/delete always target
+    exactly one entry (two entries may share a website).
+    """
+
+    return secrets.token_hex(8)
+
+
+def normalise_schema(vault_data):
+    """
+    Use the same schema as the CLI ("entries"); migrate any
+    entries saved by older web versions under "passwords",
+    and give every entry a stable ID.
+    """
+
+    legacy = vault_data.pop("passwords", [])
+    entries = vault_data.setdefault("entries", [])
+    entries.extend(legacy)
+
+    for entry in entries:
+        if not entry.get("id"):
+            entry["id"] = new_entry_id()
+
+    return vault_data
 
 
 class PasswordManagerHandler(SimpleHTTPRequestHandler):
@@ -40,6 +126,47 @@ class PasswordManagerHandler(SimpleHTTPRequestHandler):
 
         return json.loads(body.decode("utf-8"))
 
+    def save_current_vault(self):
+        """
+        Re-encrypt the in-memory vault and write it to disk.
+        encrypt_vault draws a fresh salt and nonce on every call.
+        """
+
+        blob = encrypt_vault(
+            self.server.vault_data,
+            self.server.master_password
+        )
+
+        write_atomic(VAULT_FILE, blob)
+
+    def find_entry(self, entry_id):
+        """
+        Return the entry with this ID, or None.
+        """
+
+        for entry in self.server.vault_data.get("entries", []):
+            if entry.get("id") == entry_id:
+                return entry
+
+        return None
+
+    def require_unlocked(self):
+        """
+        Send 401 and return False if the vault is locked.
+        """
+
+        if self.server.vault_data is None:
+            self.send_json(
+                401,
+                {
+                    "success": False,
+                    "message": "Vault is locked."
+                }
+            )
+            return False
+
+        return True
+
     # -------------------------
     # GET REQUESTS
     # -------------------------
@@ -54,28 +181,6 @@ class PasswordManagerHandler(SimpleHTTPRequestHandler):
 
         super().do_GET()
 
-    def get_passwords(self):
-
-        if not hasattr(self.server, "vault_data"):
-            self.send_json(
-                401,
-                {
-                    "success": False,
-                    "message": "Vault is locked."
-                }
-            )
-            return
-
-        passwords = self.server.vault_data.get("passwords", [])
-
-        self.send_json(
-            200,
-            {
-                "success": True,
-                "passwords": passwords
-            }
-        )
-
     # -------------------------
     # POST REQUESTS
     # -------------------------
@@ -84,25 +189,31 @@ class PasswordManagerHandler(SimpleHTTPRequestHandler):
 
         path = urlparse(self.path).path
 
-        if path == "/api/unlock":
-            self.unlock_vault()
+        routes = {
+            "/api/unlock": self.unlock_vault,
+            "/api/add": self.add_password,
+            "/api/edit": self.edit_password,
+            "/api/delete": self.delete_password,
+            "/api/lock": self.lock_vault,
+            "/api/generate": self.generate_password,
+            "/api/change-master": self.change_master_password,
+            "/api/backup": self.backup_vault,
+            "/api/restore": self.restore_vault,
+        }
+
+        handler = routes.get(path)
+
+        if handler is None:
+            self.send_json(
+                404,
+                {
+                    "success": False,
+                    "message": "Endpoint not found."
+                }
+            )
             return
 
-        if path == "/api/add":
-            self.add_password()
-            return
-
-        if path == "/api/generate":
-            self.generate_password()
-            return
-
-        self.send_json(
-            404,
-            {
-                "success": False,
-                "message": "Endpoint not found."
-            }
-        )
+        handler()
 
     # -------------------------
     # UNLOCK VAULT
@@ -137,10 +248,14 @@ class PasswordManagerHandler(SimpleHTTPRequestHandler):
             with open(VAULT_FILE, "rb") as f:
                 blob = f.read()
 
-            vault_data = decrypt_vault(blob, password)
+            vault_data = normalise_schema(
+                decrypt_vault(blob, password)
+            )
 
             self.server.vault_data = vault_data
             self.server.master_password = password
+
+            log_security_event("WEB_LOGIN_SUCCESS")
 
             self.send_json(
                 200,
@@ -151,11 +266,14 @@ class PasswordManagerHandler(SimpleHTTPRequestHandler):
             )
 
         except ValueError:
+
+            log_security_event("WEB_LOGIN_FAILED")
+
             self.send_json(
                 401,
                 {
                     "success": False,
-                    "message": "Wrong master password OR vault was tampered with."
+                    "message": GENERIC_AUTH_ERROR
                 }
             )
 
@@ -174,17 +292,10 @@ class PasswordManagerHandler(SimpleHTTPRequestHandler):
 
     def get_passwords(self):
 
-        if not hasattr(self.server, "vault_data"):
-            self.send_json(
-                401,
-                {
-                    "success": False,
-                    "message": "Vault is locked."
-                }
-            )
+        if not self.require_unlocked():
             return
 
-        passwords = self.server.vault_data.get("passwords", [])
+        passwords = self.server.vault_data.get("entries", [])
 
         self.send_json(
             200,
@@ -202,14 +313,7 @@ class PasswordManagerHandler(SimpleHTTPRequestHandler):
 
         try:
 
-            if not hasattr(self.server, "vault_data"):
-                self.send_json(
-                    401,
-                    {
-                        "success": False,
-                        "message": "Vault is locked."
-                    }
-                )
+            if not self.require_unlocked():
                 return
 
             data = self.read_json()
@@ -230,7 +334,7 @@ class PasswordManagerHandler(SimpleHTTPRequestHandler):
 
             strength, _ = check_password_strength(password)
 
-            if strength in ("Very Weak", "Weak"):
+            if strength in WEAK_LEVELS:
                 self.send_json(
                     400,
                     {
@@ -241,29 +345,17 @@ class PasswordManagerHandler(SimpleHTTPRequestHandler):
                 return
 
             entry = {
+                "id": new_entry_id(),
                 "website": website,
                 "username": username,
                 "password": password
             }
 
-            if "passwords" not in self.server.vault_data:
-                self.server.vault_data["passwords"] = []
+            self.server.vault_data.setdefault("entries", []).append(entry)
 
-            self.server.vault_data["passwords"].append(entry)
+            self.save_current_vault()
 
-            blob = encrypt_vault(
-                self.server.vault_data,
-                self.server.master_password
-            )
-
-            temp_file = VAULT_FILE + ".tmp"
-
-            with open(temp_file, "wb") as f:
-                f.write(blob)
-                f.flush()
-                os.fsync(f.fileno())
-
-            os.replace(temp_file, VAULT_FILE)
+            log_security_event("WEB_PASSWORD_ENTRY_ADDED")
 
             self.send_json(
                 200,
@@ -281,6 +373,170 @@ class PasswordManagerHandler(SimpleHTTPRequestHandler):
                     "message": "Could not save the password."
                 }
             )
+
+    # -------------------------
+    # EDIT PASSWORD ENTRY
+    # -------------------------
+
+    def edit_password(self):
+
+        try:
+
+            if not self.require_unlocked():
+                return
+
+            data = self.read_json()
+
+            entry_id = data.get("id", "")
+            website = data.get("website", "").strip()
+            username = data.get("username", "").strip()
+            password = data.get("password", "")
+
+            entry = self.find_entry(entry_id)
+
+            if entry is None:
+                self.send_json(
+                    404,
+                    {
+                        "success": False,
+                        "message": "Entry not found. Refresh and try again."
+                    }
+                )
+                return
+
+            if not website or not username or not password:
+                self.send_json(
+                    400,
+                    {
+                        "success": False,
+                        "message": "Website, username and password are required."
+                    }
+                )
+                return
+
+            strength, _ = check_password_strength(password)
+
+            if strength in WEAK_LEVELS:
+                self.send_json(
+                    400,
+                    {
+                        "success": False,
+                        "message": f"Password is too weak: {strength}"
+                    }
+                )
+                return
+
+            # Keep a copy so the change can be undone if saving fails.
+            previous = dict(entry)
+
+            entry["website"] = website
+            entry["username"] = username
+            entry["password"] = password
+
+            try:
+                self.save_current_vault()
+
+            except Exception:
+                entry.clear()
+                entry.update(previous)
+                raise
+
+            log_security_event("WEB_PASSWORD_ENTRY_EDITED")
+
+            self.send_json(
+                200,
+                {
+                    "success": True,
+                    "message": "Entry updated."
+                }
+            )
+
+        except Exception:
+            self.send_json(
+                500,
+                {
+                    "success": False,
+                    "message": "Could not update the entry."
+                }
+            )
+
+    # -------------------------
+    # DELETE PASSWORD ENTRY
+    # -------------------------
+
+    def delete_password(self):
+
+        try:
+
+            if not self.require_unlocked():
+                return
+
+            data = self.read_json()
+            entry_id = data.get("id", "")
+
+            entries = self.server.vault_data.get("entries", [])
+            entry = self.find_entry(entry_id)
+
+            if entry is None:
+                self.send_json(
+                    404,
+                    {
+                        "success": False,
+                        "message": "Entry not found. Refresh and try again."
+                    }
+                )
+                return
+
+            index = entries.index(entry)
+            entries.pop(index)
+
+            try:
+                self.save_current_vault()
+
+            except Exception:
+                entries.insert(index, entry)
+                raise
+
+            log_security_event("WEB_PASSWORD_ENTRY_DELETED")
+
+            self.send_json(
+                200,
+                {
+                    "success": True,
+                    "message": "Entry deleted."
+                }
+            )
+
+        except Exception:
+            self.send_json(
+                500,
+                {
+                    "success": False,
+                    "message": "Could not delete the entry."
+                }
+            )
+
+    # -------------------------
+    # LOCK VAULT (clears decrypted data on the server)
+    # -------------------------
+
+    def lock_vault(self):
+
+        if self.server.vault_data is not None:
+            self.server.vault_data.clear()
+
+        self.server.vault_data = None
+        self.server.master_password = None
+
+        log_security_event("WEB_VAULT_LOCKED")
+
+        self.send_json(
+            200,
+            {
+                "success": True,
+                "message": "Vault locked."
+            }
+        )
 
     # -------------------------
     # GENERATE PASSWORD
@@ -306,6 +562,262 @@ class PasswordManagerHandler(SimpleHTTPRequestHandler):
                 {
                     "success": False,
                     "message": "Could not generate password."
+                }
+            )
+
+    # -------------------------
+    # CHANGE MASTER PASSWORD
+    # -------------------------
+
+    def change_master_password(self):
+
+        try:
+
+            if not self.require_unlocked():
+                return
+
+            data = self.read_json()
+
+            current_pw = data.get("currentPassword", "")
+            new_pw = data.get("newPassword", "")
+            confirm_pw = data.get("confirmPassword", "")
+
+            if not current_pw or not new_pw or not confirm_pw:
+                self.send_json(
+                    400,
+                    {
+                        "success": False,
+                        "message": "All three password fields are required."
+                    }
+                )
+                return
+
+            # Prove knowledge of the current master password by
+            # decrypting the vault file with it (same check as the CLI).
+            blob = read_vault_file(VAULT_FILE)
+
+            if blob is None:
+                self.send_json(
+                    404,
+                    {
+                        "success": False,
+                        "message": "Vault does not exist."
+                    }
+                )
+                return
+
+            try:
+                decrypt_vault(blob, current_pw)
+
+            except ValueError:
+
+                log_security_event("WEB_MASTER_PASSWORD_CHANGE_FAILED")
+
+                self.send_json(
+                    401,
+                    {
+                        "success": False,
+                        "message": "Current master password is incorrect."
+                    }
+                )
+                return
+
+            if new_pw == current_pw:
+                self.send_json(
+                    400,
+                    {
+                        "success": False,
+                        "message": "New master password must be different from the current one."
+                    }
+                )
+                return
+
+            if new_pw != confirm_pw:
+                self.send_json(
+                    400,
+                    {
+                        "success": False,
+                        "message": "New passwords do not match."
+                    }
+                )
+                return
+
+            label, tips = check_password_strength(new_pw)
+
+            if label in WEAK_LEVELS:
+                self.send_json(
+                    400,
+                    {
+                        "success": False,
+                        "message": f"New master password is too weak: {label}.",
+                        "tips": tips
+                    }
+                )
+                return
+
+            # Re-encrypt: encrypt_vault draws a fresh salt and nonce,
+            # so the new password produces a brand-new key.
+            new_blob = encrypt_vault(self.server.vault_data, new_pw)
+
+            write_atomic(VAULT_FILE, new_blob)
+
+            self.server.master_password = new_pw
+
+            log_security_event("WEB_MASTER_PASSWORD_CHANGED")
+
+            self.send_json(
+                200,
+                {
+                    "success": True,
+                    "message": "Master password changed. Use the new one next time."
+                }
+            )
+
+        except Exception:
+            self.send_json(
+                500,
+                {
+                    "success": False,
+                    "message": "Could not change the master password."
+                }
+            )
+
+    # -------------------------
+    # BACKUP VAULT
+    # -------------------------
+
+    def backup_vault(self):
+
+        try:
+
+            if not self.require_unlocked():
+                return
+
+            blob = read_vault_file(VAULT_FILE)
+
+            if blob is None:
+                self.send_json(
+                    404,
+                    {
+                        "success": False,
+                        "message": "No valid vault to back up."
+                    }
+                )
+                return
+
+            # The backup is a byte-for-byte copy: still encrypted,
+            # still protected by the current master password.
+            write_atomic(BACKUP_FILE, blob)
+
+            log_security_event("VAULT_BACKUP_CREATED")
+
+            self.send_json(
+                200,
+                {
+                    "success": True,
+                    "message": "Encrypted backup saved."
+                }
+            )
+
+        except Exception:
+            self.send_json(
+                500,
+                {
+                    "success": False,
+                    "message": "Backup could not be created."
+                }
+            )
+
+    # -------------------------
+    # RESTORE VAULT
+    # -------------------------
+
+    def restore_vault(self):
+
+        try:
+
+            if not self.require_unlocked():
+                return
+
+            data = self.read_json()
+            backup_pw = data.get("backupPassword", "")
+
+            if not backup_pw:
+                self.send_json(
+                    400,
+                    {
+                        "success": False,
+                        "message": "Enter the master password of the backup."
+                    }
+                )
+                return
+
+            backup_blob = read_vault_file(BACKUP_FILE)
+
+            if backup_blob is None:
+                self.send_json(
+                    404,
+                    {
+                        "success": False,
+                        "message": "No valid backup file found."
+                    }
+                )
+                return
+
+            # Verify the backup BEFORE touching the current vault.
+            try:
+                restored = normalise_schema(
+                    decrypt_vault(backup_blob, backup_pw)
+                )
+
+            except ValueError:
+
+                log_security_event("VAULT_RESTORE_FAILED")
+
+                self.send_json(
+                    401,
+                    {
+                        "success": False,
+                        "message": "Backup authentication failed."
+                    }
+                )
+                return
+
+            # Keep a safety copy of the current vault.
+            current_blob = read_vault_file(VAULT_FILE)
+
+            if current_blob is not None:
+                write_atomic(VAULT_FILE + ".before_restore", current_blob)
+
+            write_atomic(VAULT_FILE, backup_blob)
+
+            self.server.vault_data = restored
+            self.server.master_password = backup_pw
+
+            log_security_event("VAULT_RESTORED")
+
+            count = len(restored.get("entries", []))
+
+            self.send_json(
+                200,
+                {
+                    "success": True,
+                    "message": (
+                        f"Restored {count} entries. Unlock with the "
+                        "backup's master password from now on."
+                    )
+                }
+            )
+
+        except Exception:
+
+            log_security_event("VAULT_RESTORE_FAILED")
+
+            self.send_json(
+                500,
+                {
+                    "success": False,
+                    "message": "Could not restore the backup."
                 }
             )
 
