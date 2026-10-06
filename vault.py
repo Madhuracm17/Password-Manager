@@ -47,7 +47,7 @@ WEAK_LEVELS = ("Very Weak", "Weak")
 MAX_LOGIN_ATTEMPTS = 3
 RETRY_DELAYS = (1, 2)
 
-AUTO_LOCK_SECONDS = 10   # 2 minutes
+AUTO_LOCK_SECONDS = 120   # CLI: 2 minutes (the web UI uses 10 seconds, see server.py)
 
 
 # ============================================================

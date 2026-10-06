@@ -1,6 +1,8 @@
 import json
 import os
 import secrets
+import threading
+import time
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse
 
@@ -20,6 +22,9 @@ from vault import (
 
 HOST = "127.0.0.1"
 PORT = 8000
+
+# Web session locks after this many seconds without user activity.
+WEB_AUTO_LOCK_SECONDS = 10
 
 GENERIC_AUTH_ERROR = "Wrong master password OR vault was tampered with."
 
@@ -165,6 +170,8 @@ class PasswordManagerHandler(SimpleHTTPRequestHandler):
             )
             return False
 
+        self.server.last_activity = time.monotonic()
+
         return True
 
     # -------------------------
@@ -176,7 +183,8 @@ class PasswordManagerHandler(SimpleHTTPRequestHandler):
         path = urlparse(self.path).path
 
         if path == "/api/passwords":
-            self.get_passwords()
+            with self.server.state_lock:
+                self.get_passwords()
             return
 
         super().do_GET()
@@ -199,6 +207,7 @@ class PasswordManagerHandler(SimpleHTTPRequestHandler):
             "/api/change-master": self.change_master_password,
             "/api/backup": self.backup_vault,
             "/api/restore": self.restore_vault,
+            "/api/ping": self.ping,
         }
 
         handler = routes.get(path)
@@ -213,7 +222,10 @@ class PasswordManagerHandler(SimpleHTTPRequestHandler):
             )
             return
 
-        handler()
+        # One request at a time touches the session state, so the
+        # auto-lock thread can never clear it halfway through a request.
+        with self.server.state_lock:
+            handler()
 
     # -------------------------
     # UNLOCK VAULT
@@ -254,6 +266,7 @@ class PasswordManagerHandler(SimpleHTTPRequestHandler):
 
             self.server.vault_data = vault_data
             self.server.master_password = password
+            self.server.last_activity = time.monotonic()
 
             log_security_event("WEB_LOGIN_SUCCESS")
 
@@ -261,7 +274,8 @@ class PasswordManagerHandler(SimpleHTTPRequestHandler):
                 200,
                 {
                     "success": True,
-                    "message": "Vault unlocked successfully."
+                    "message": "Vault unlocked successfully.",
+                    "autoLockSeconds": WEB_AUTO_LOCK_SECONDS
                 }
             )
 
@@ -522,11 +536,7 @@ class PasswordManagerHandler(SimpleHTTPRequestHandler):
 
     def lock_vault(self):
 
-        if self.server.vault_data is not None:
-            self.server.vault_data.clear()
-
-        self.server.vault_data = None
-        self.server.master_password = None
+        clear_session(self.server)
 
         log_security_event("WEB_VAULT_LOCKED")
 
@@ -535,6 +545,22 @@ class PasswordManagerHandler(SimpleHTTPRequestHandler):
             {
                 "success": True,
                 "message": "Vault locked."
+            }
+        )
+
+    # -------------------------
+    # PING (keeps the session alive while the user is active)
+    # -------------------------
+
+    def ping(self):
+
+        if not self.require_unlocked():
+            return
+
+        self.send_json(
+            200,
+            {
+                "success": True
             }
         )
 
@@ -826,6 +852,40 @@ class PasswordManagerServer(HTTPServer):
 
     vault_data = None
     master_password = None
+    last_activity = 0.0
+    state_lock = threading.Lock()
+
+
+def clear_session(server):
+    """
+    Forget the decrypted vault and the master password.
+    """
+
+    if server.vault_data is not None:
+        server.vault_data.clear()
+
+    server.vault_data = None
+    server.master_password = None
+
+
+def auto_lock_worker(server, stop_event):
+    """
+    Lock the web session after WEB_AUTO_LOCK_SECONDS without
+    activity, even if the browser tab was simply closed.
+    """
+
+    while not stop_event.wait(1):
+
+        with server.state_lock:
+
+            if server.vault_data is None:
+                continue
+
+            idle = time.monotonic() - server.last_activity
+
+            if idle >= WEB_AUTO_LOCK_SECONDS:
+                clear_session(server)
+                log_security_event("WEB_SESSION_AUTO_LOCKED")
 
 
 def main():
@@ -835,7 +895,16 @@ def main():
         PasswordManagerHandler
     )
 
+    stop_event = threading.Event()
+
+    threading.Thread(
+        target=auto_lock_worker,
+        args=(server, stop_event),
+        daemon=True
+    ).start()
+
     print(f"Password Manager running at http://{HOST}:{PORT}")
+    print(f"Web sessions auto-lock after {WEB_AUTO_LOCK_SECONDS} seconds of inactivity.")
     print("Press Ctrl+C to stop the server.")
 
     try:
@@ -846,12 +915,8 @@ def main():
 
     finally:
 
-        if server.master_password is not None:
-            server.master_password = None
-
-        if server.vault_data is not None:
-            server.vault_data.clear()
-
+        stop_event.set()
+        clear_session(server)
         server.server_close()
 
 

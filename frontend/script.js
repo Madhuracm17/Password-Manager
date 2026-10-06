@@ -58,6 +58,9 @@ unlockBtn.addEventListener("click", async () => {
 
         unlocked = true;
 
+        autoLockMs = (result.autoLockSeconds || 10) * 1000;
+        startIdleWatch();
+
         lockBtn.classList.remove("hidden");
         loginSection.classList.add("hidden");
         vaultSection.classList.remove("hidden");
@@ -79,31 +82,65 @@ unlockBtn.addEventListener("click", async () => {
 // LOCK VAULT
 // -------------------------
 
-lockBtn.addEventListener("click", async () => {
-
-    try {
-        await fetch("/api/lock", { method: "POST" });
-    } catch (error) {
-        // UI is cleared below either way.
-    }
+// Clear everything on screen and show the unlock form.
+function lockUI(message) {
 
     unlocked = false;
+    stopIdleWatch();
 
     lockBtn.classList.add("hidden");
     vaultSection.classList.add("hidden");
     loginSection.classList.remove("hidden");
 
     masterPassword.value = "";
+    website.value = "";
+    username.value = "";
     entryPassword.value = "";
+    addMessage.textContent = "";
 
-    passwordList.innerHTML = `
-        <p class="empty-message">
-            No passwords loaded.
-        </p>
-    `;
+    passwordList.innerHTML = "";
+    const empty = document.createElement("p");
+    empty.className = "empty-message";
+    empty.textContent = "No passwords loaded.";
+    passwordList.appendChild(empty);
 
-    loginMessage.textContent = "Vault locked.";
+    clearSecurityForms();
+    securityMessage.textContent = "";
+    document.getElementById("listMessage").textContent = "";
+
+    loginMessage.textContent = message;
+}
+
+
+// Tell the server to forget the decrypted vault, then clear the screen.
+async function lockVault(message) {
+
+    try {
+        await fetch("/api/lock", { method: "POST" });
+    } catch (error) {
+        // The screen is cleared either way.
+    }
+
+    lockUI(message);
+}
+
+
+lockBtn.addEventListener("click", () => {
+    lockVault("Vault locked.");
 });
+
+
+// If the server says the vault is locked (for example after auto-lock),
+// clear the screen too. Returns true when that happened.
+function handleLockedResponse(response, result) {
+
+    if (response.status === 401 && result && result.message === "Vault is locked.") {
+        lockUI("Session expired. Unlock again to continue.");
+        return true;
+    }
+
+    return false;
+}
 
 
 // -------------------------
@@ -184,6 +221,10 @@ addBtn.addEventListener("click", async () => {
 
         const result = await response.json();
 
+        if (handleLockedResponse(response, result)) {
+            return;
+        }
+
         if (!response.ok) {
             addMessage.textContent = result.message;
             return;
@@ -252,6 +293,10 @@ async function loadPasswords() {
         const response = await fetch("/api/passwords");
 
         const result = await response.json();
+
+        if (handleLockedResponse(response, result)) {
+            return;
+        }
 
         if (!response.ok) {
             showEmpty(result.message);
@@ -519,16 +564,12 @@ async function postJson(url, body) {
 
     const result = await response.json();
 
+    if (handleLockedResponse(response, result)) {
+        return { ok: false, result: { message: "" } };
+    }
+
     return { ok: response.ok, result };
 }
-
-
-// Clear password fields whenever the vault is locked.
-lockBtn.addEventListener("click", () => {
-    clearSecurityForms();
-    securityMessage.textContent = "";
-    listMessage.textContent = "";
-});
 
 
 // ---- Change master password ----
@@ -671,3 +712,69 @@ confirmRestoreBtn.addEventListener("click", async () => {
         securityMessage.textContent = "Could not restore the backup.";
     }
 });
+
+
+// -------------------------
+// AUTO-LOCK AFTER INACTIVITY
+// The browser locks after the idle period, and the server
+// enforces the same limit in case the tab is closed.
+// -------------------------
+
+let autoLockMs = 10000;
+let idleTimer = null;
+let lastPing = 0;
+
+const ACTIVITY_EVENTS = ["mousemove", "mousedown", "keydown", "scroll", "touchstart"];
+const PING_INTERVAL_MS = 3000;
+
+
+function resetIdleTimer() {
+
+    if (!unlocked) {
+        return;
+    }
+
+    clearTimeout(idleTimer);
+
+    idleTimer = setTimeout(() => {
+        const seconds = Math.round(autoLockMs / 1000);
+        lockVault(`Locked after ${seconds} seconds of inactivity.`);
+    }, autoLockMs);
+
+    // Keep the server-side session alive while the user is active.
+    const now = Date.now();
+
+    if (now - lastPing > PING_INTERVAL_MS) {
+        lastPing = now;
+
+        fetch("/api/ping", { method: "POST" })
+            .then(async (response) => {
+                const result = await response.json();
+                handleLockedResponse(response, result);
+            })
+            .catch(() => {});
+    }
+}
+
+
+function startIdleWatch() {
+
+    lastPing = Date.now();
+
+    ACTIVITY_EVENTS.forEach((name) => {
+        document.addEventListener(name, resetIdleTimer, { passive: true });
+    });
+
+    resetIdleTimer();
+}
+
+
+function stopIdleWatch() {
+
+    clearTimeout(idleTimer);
+    idleTimer = null;
+
+    ACTIVITY_EVENTS.forEach((name) => {
+        document.removeEventListener(name, resetIdleTimer);
+    });
+}
